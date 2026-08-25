@@ -1,0 +1,186 @@
+# 模型分层路由 —— 支持逐角色指定供应商，可混用。
+#
+# 当前方案：文笔敏感的三个角色走 Claude（PackyAPI cc-sale 分组），
+# 其余走 DeepSeek 官方直连。
+
+default_provider: packyapi
+
+providers:
+  # ---- PackyAPI 中转站，cc-sale 分组 ----
+  # 分组倍率 0.8（cc=2 / cc-expensive=2.2 / claude-officially=7），是最便宜的
+  # Claude 分组，且**支持第三方接入** —— 这一条很关键，我们写的是自己的
+  # Python 程序，不是 Claude Code CLI，属于第三方。
+  #
+  # ⚠️ 官方对此分组的警告：「此分组缓存可能会有异常」
+  #    本项目的成本架构建立在 prompt 缓存之上，缓存失效约等于 10 倍输入成本。
+  #    充值前务必先跑：.venv/bin/python scripts/verify_cache.py writer
+  #    若缓存不命中，退路见下方 packyapi_awsq（倍率 0.3，但不稳定）。
+  #
+  # ⚠️ 确认令牌建在 cc-sale 而非 cc —— cc 分组明确禁止第三方接入，违者封号。
+  packyapi:
+    kind: anthropic
+    base_url: https://cf.api.fan
+    api_key_env: PACKYAPI_AUTH_TOKEN
+    auth_style: bearer          # 中转站用 Authorization: Bearer，非官方的 x-api-key
+    # ⚠️ 实测该号池会间歇性返回 403（错误体是 packy_bad_response_status_code
+    #    "上游返回 403"）—— 这是 packyapi 在转述上游账号失效，不是对我们的鉴权
+    #    拒绝：同样字节的请求有时 200 有时 403，失败在 0.5s 内返回而成功要 8s。
+    #    2026-08-19 实测成功率约 10-20%。
+    #    SDK 不会重试 403（它按语义当作永久拒绝），所以显式加上。
+    #    若长期低成功率，是渠道健康问题，重试救不回来 —— 联系 packyapi 或换组。
+    max_retries: 9
+    retry_on_status: [403, 422, 502, 504]
+    # 号池的坏窗口是分钟级的。封顶 8 秒时 9 次重试只覆盖约 40 秒，
+    # 实测一次卷大纲的重试全部落在同一个坏窗口里而失败。
+    # 调到 60 秒后总重试窗口约 2 分钟，足以跨过多数抖动。
+    retry_max_wait: 60
+    # 实测：该中转站会剥掉 output_config.format，模型返回 markdown 散文而非
+    # JSON。配 false 直接走"schema 写进 prompt + 宽松解析"的兜底路径，
+    # 省掉每次的探测调用。若哪天中转站支持了，改回 true 或删掉此行。
+    supports_structured_output: false
+
+  # ---- DeepSeek 官方直连 ----
+  deepseek:
+    kind: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    supports_effort: false      # 若你的型号支持思考强度，改回 true
+
+  # ---- PackyAPI codex 分组：**不可用于本项目** ----
+  # 实测 2026-08-21：4 个模型 × 2 种协议，8 种组合全部被拒，返回
+  #   「我们检测到您的客户端存在异常，请使用标准 Codex 客户端请求，
+  #     请避免任何基于我方 API 二次开发」
+  # 该分组主动检测并封锁非 Codex 客户端，且明文禁止二次开发。
+  # 这不是技术障碍，是供应商的明确禁止 —— 不要尝试绕过客户端检测。
+  # 保留配置仅为记录，不要把角色指过来。
+  #
+  # 想用 GPT 请走下面的 packyapi_azure（文档明确写了支持第三方工具）。
+  # ---- 原说明（倍率 0.5，走 OpenAI 兼容端点）----
+  # 令牌按分组发放：这里要填**在 codex 分组新建的**令牌，
+  # 不能复用 cc-sale 的那个。
+  #
+  # ⚠️ 官方对该分组的说明：「这个分组的模型都是对编程特化的，用在其他方面
+  #    可能效果并不理想」。用于写小说属于"其他方面" —— 是否成立要用
+  #    scripts/style_fingerprint.py 对比实测，不要凭感觉。
+  packyapi_codex:
+    kind: openai
+    base_url: https://cf.api.fan/v1     # OpenAI 兼容端点自带 /v1
+    api_key_env: PACKYAPI_CODEX_TOKEN
+    supports_effort: false
+    max_retries: 6
+    retry_on_status: [403, 422, 502, 504]
+    retry_max_wait: 30
+
+  # ---- PackyAPI azure-officially 分组：合法的 GPT 路径 ----
+  # 文档原话：「Azure官方渠道，提供GPT相关模型，**可以使用在 OpenCode 等
+  # 第三方工具中**，也可以拿来聊天」—— 明确允许第三方接入。
+  #
+  # 代价是倍率 5，是 cc-sale(0.8) 的 6.25 倍：全书成本从约 $20 涨到约 $130。
+  # 令牌要在 azure-officially 分组单独新建，填到 PACKYAPI_AZURE_TOKEN。
+  packyapi_azure:
+    kind: openai
+    base_url: https://cf.api.fan/v1
+    api_key_env: PACKYAPI_AZURE_TOKEN
+    supports_effort: false
+    max_retries: 6
+    retry_on_status: [403, 422, 502, 504]
+    retry_max_wait: 30
+
+  # ---- 退路：aws-q 分组（倍率 0.3，最便宜）----
+  # 模型清单与 cc-sale 完全一致（含 claude-opus-5），倍率便宜 2.67 倍。
+  # 代价有两个：
+  #   1. 逆向 Kiro AWSQ 渠道，上下文 200K（本项目单次输入约 25-45K，不构成约束）
+  #   2. ⚠️ 官方警告"容易出现 422 错误，稳定性不如 cc" —— anthropic SDK 默认
+  #      不重试 422，所以这里显式配了重试，否则自动跑 N 章撞一次就整轮中断。
+  # 定位是"实在不行才用"，不是常规选项。
+  packyapi_awsq:
+    kind: anthropic
+    base_url: https://cf.api.fan
+    api_key_env: PACKYAPI_AUTH_TOKEN
+    auth_style: bearer
+    max_retries: 4
+    # 只列 SDK **不会**自己重试的状态码。anthropic SDK 默认已重试连接错误、
+    # 408/409/429 和所有 5xx；把它们再列一遍会变成乘法重试，失败时白等很久。
+    # 422 是 aws-q 的特征性错误，也正是 SDK 漏掉的那一个。
+    #
+    # 403 是 2026-08-21 补的：cc-sale 连不上而降级过来时，aws-q 回了
+    # 403「上游服务暂时不可用」，SDK 按语义当永久拒绝不重试，第 3 章就此
+    # 整轮中断。降级目标不重试 403，等于降级白降 —— 主力挂掉的时刻，
+    # 恰恰是备胎也最抖的时刻。
+    retry_on_status: [403, 422]
+    retry_max_wait: 60
+
+  # ---- 官方直连（如果以后拿到官方 key）----
+  anthropic:
+    kind: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+
+# 角色分工：文笔活给 Claude，结构化活给 DeepSeek。
+roles:
+  # === 创作链路 ===
+  # 主用 cc-sale 的 claude-opus-5。GPT 路线的现状见上方 packyapi_codex 注释：
+  # codex 组禁止第三方接入，azure 组可用但贵 6.25 倍。
+  architect:                     # 卷大纲 / 章细纲 / scene spec
+    provider: packyapi
+    model: claude-opus-5
+    effort: high
+    max_tokens: 16000
+    fallbacks:
+      - {provider: packyapi_awsq, model: claude-opus-5}
+      - {provider: deepseek, model: deepseek-v4-flash}
+
+  writer:                        # 逐 scene 生成正文
+    provider: packyapi
+    model: claude-opus-5
+    effort: high
+    max_tokens: 8000
+    fallbacks:
+      - {provider: packyapi_awsq, model: claude-opus-5}
+
+  stitcher:                      # 过渡润色、章首尾钩子、全章节奏
+    # 必须与 writer 同模型：最后一道经手正文的工序，换模型会和 writer 打架
+    provider: packyapi
+    model: claude-opus-5
+    effort: medium
+    max_tokens: 12000
+    fallbacks:
+      - {provider: packyapi_awsq, model: claude-opus-5}
+
+  # === DeepSeek：只吐结构化 JSON，不需要文笔。实测 283 次调用零故障 ===
+  judge:
+    provider: deepseek
+    model: deepseek-v4-flash
+    # 思考模型：推理与正文共用预算。8000 时实测返回空响应（整章 3.6K 字
+    # 加设定集，推理就把额度吃光了）。
+    max_tokens: 24000
+  archivist:
+    provider: deepseek
+    model: deepseek-v4-flash
+    max_tokens: 24000
+  extractor:
+    provider: deepseek
+    model: deepseek-v4-flash
+    max_tokens: 32000
+
+# 计价表 ($/1M tokens)，仅用于 run_log 成本核算。
+#
+# 按分组倍率反推：文档称 claude-officially（倍率 7）"价格基本对标官方价"，
+# 故 cc-sale（倍率 0.8）≈ 官方 × 0.8/7 ≈ 0.114。这是**估算**，跑几章后拿
+# run_log 累计值和 packyapi 后台实际扣费对一下，对不上就改这里。
+#
+# ✅ 2026-08-21 复核：该渠道的缓存**是通的**。当天 41 次调用有 23 次 cache_read
+#    非零，累计读回 110 万 token，比全不命中省 27%。8-19 那条"cache_control 被吞、
+#    cache_read 恒为 0"的结论作废（8-20 起就带上了）—— 下面的 cache_multipliers
+#    正在真实参与计价，改动它会直接改变 run_log 的成本数。
+#    实测每章约 $0.30（含修订轮），140 章外推约 $42。
+pricing:
+  claude-opus-5:      {input: 0.571, output: 2.857}   # 官方 5/25 × 0.114
+  claude-sonnet-5:    {input: 0.343, output: 1.714}   # 官方 3/15 × 0.114
+  claude-haiku-4-5:   {input: 0.114, output: 0.571}   # 官方 1/5  × 0.114
+  # DeepSeek 官方直连，待填实际价目（未填则成本记 0，不影响运行）
+  # deepseek-v4-flash: {input: ?, output: ?}
+
+cache_multipliers:
+  read: 0.1
+  write_5m: 1.25
+  write_1h: 2.0

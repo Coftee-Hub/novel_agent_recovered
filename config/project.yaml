@@ -1,0 +1,127 @@
+# 作品配置 —— 规范 v0，跑几章后按实际效果调
+meta:
+  title: "未命名"
+  genre: "现代言情"
+  subgenre: "大学校园 + 都市职场"
+  stages: ["大学", "毕业过渡", "职场"]
+  target_total_words: 400000
+  target_chapters: 140
+  volume_size: 18          # 每卷章数，卷末触发卷级摘要压缩
+
+# 字数与结构 —— gate 硬检查
+#
+# 这些数字**不是拍脑袋定的**，是从 18 本同题材范本（大学/职场/跨阶段，
+# 排除题材机关重的）实测出来的：
+#   单章字数   实测 1677–5253，中位 3658
+#   对话占比   实测 12%–35%，中位 26%
+#   单段字数   实测中位 26，P95 74
+# 初版曾定"对话占比 30–55%"，会打回三分之一的语料；"单段上限 200"
+# 则几乎从不触发（真实中位数只有 26 字）。以下为按实测修正后的值。
+length:
+  chapter_min: 2500
+  chapter_max: 5000
+  scene_min: 800
+  scene_max: 1800
+  scenes_per_chapter_min: 2
+  scenes_per_chapter_max: 4
+  paragraph_max_chars: 120        # P95 实测 52–124，取上沿
+  paragraph_max_sentences: 5
+  paragraph_median_max: 50        # 真正抓住本题材特征的一条：段落必须普遍短
+  dialogue_ratio_min: 0.15
+  dialogue_ratio_max: 0.40
+
+# 格式规范 —— gate 硬检查
+format:
+  chapter_title_pattern: '^## 第\d+章\s+\S+'
+  require_fullwidth_punctuation: true
+  ellipsis: "……"          # 禁止 ... 。。。
+  dash: "——"              # 禁止 -- －－
+  forbid_halfwidth: [",", "!", "?", ";", ":"]
+  forbid_ascii_quotes: true
+  forbid_repeated_marks: ["！！", "？？", "。。"]
+  dialogue_own_paragraph: true
+
+# 抄袭防线
+similarity:
+  ngram_size: 13           # 连续 13 字与语料完全相同 → 硬失败
+  max_matches: 0
+
+# 质量评审 —— judge
+judge:
+  dimensions:
+    - emotional_progress    # 情绪推进
+    - character_consistency # 人物一致性
+    - dialogue_quality      # 对话质量
+    - sensory_detail        # 感官与细节
+    - logic_consistency     # 逻辑与设定一致
+    - cliche_avoidance      # 陈词滥调规避
+    - chapter_hook          # 章末钩子
+  min_per_dimension: 3      # 每项 1-5，至少 3
+  min_total: 24             # 满分 35
+  max_revisions: 2          # 超过即落 needs_human
+
+# 文风目标区间 —— gate 的**软检查**（超出只警告，不阻断）。
+#
+# 取自三本文风源的实测指纹（scripts/style_fingerprint.py）：
+#   偷偷藏不住 A 短句心理型 / 破茧 B 感官比喻型 / 坠落 A+B 融合
+# 这些是"整章的统计特征"，单看一句话没意义，但一整章偏离了就是文风跑偏。
+# 硬检查（字数/标点/段落）挡的是错误，这些软检查挡的是**平庸**。
+style:
+  # 容差：超出区间但在这个相对幅度内，降级为**警告**而不是错误。
+  #
+  # 理由：这些是整章的统计特征，不是对错判定。某些章节的场景天然就没有
+  # 对话空间（独处、单向观察），硬阈值会让 gate 反复打回 writer ——
+  # 而问题其实在细纲，惩罚 writer 解决不了。
+  # 擦边而质量过关的稿子应当放行，判定交给 judge。
+  #
+  # 0.2 = 允许超出边界值的 20%。例：对话占比下限 15%，软下限 12%。
+  tolerance: 0.2
+  # 取自三本文风源的实测指纹（scripts/style_fingerprint.py）：
+  #   偷偷藏不住 A 短句心理 / 破茧 B 感官比喻 / 坠落 A+B 融合
+  # 单看一句话没意义，一整章偏离了就是文风跑偏。
+  # 硬检查（字数/标点）挡的是**错误**，这些挡的是**平庸**。
+  #
+  # 上下界都要有。第 13 章的教训：只设 short_sentence_ratio_min 而不设 max，
+  # 模型把短句用到 33%（源书 19%），读起来就是断断续续不像人写的。
+  sentence_median_min: 17          # 源书 20-23
+  sentence_median_max: 27
+  short_sentence_ratio_min: 0.13   # 源书 18-19%
+  short_sentence_ratio_max: 0.26   # ← 新增：防碎，第13章 33%
+  long_sentence_ratio_min: 0.18    # ← 新增：防碎，第13章仅 9%，源书 26-38%
+  long_sentence_ratio_max: 0.48
+  # 每万字命中数
+  # ⚠️ 这里的 28 与 WRITER_ROLE 里写的目标区间（45-95）**故意不一致**。
+  #
+  # 原因：prompt 目标与实际产出之间有系统性落差。让 writer 瞄准 45，
+  # 它稳定落在 29 左右 —— 而 29 正是作者读过后认可的密度。
+  # 若把 prompt 目标也降到 30，产出会跟着掉到 20 以下。
+  #
+  # 所以：prompt 里的数字是**瞄准点**，这里的数字是**验收线**，
+  # 两者本就不该相等。源书均值 74，但这个故事的女主"连对自己都不把话
+  # 说完"，比源书更克制是符合人物的。
+  psychology_min: 28               # 源书 54-91，本书刻意更克制
+  metaphor_min: 14                 # 源书 19-33。第13章仅 3.4 ——「没有感情带入」
+  metaphor_max: 40                 # 上限防用力过猛。实测 38.8 已偏高（源书 27）
+  sensory_touch_min: 12            # 源书 14-31。第13章仅 3.4
+  modal_particle_min: 22           # 源书 37-58。第13章仅 10 ——「不像人写的」
+  modal_particle_max: 70           # 太多显得聒噪。实测 61.4 已接近上限
+
+# 亲密尺度默认档（architect 可逐 scene 覆盖）
+intimacy:
+  default_level: "L1"       # L0 无身体接触 / L1 点到为止 / L2 感官不露骨
+  max_level: "L2"           # 硬上限，不可超过
+
+# 上下文装配
+context:
+  # 章级摘要进 context 的**上限**，不是常规窗口。
+  #
+  # 常规规则是「尚未被卷梗概覆盖的章节全部进去」——两层摘要的分界线由卷末
+  # 压缩来划，而不是由一个与故事结构无关的数字来划。旧值是 10，而一卷 18 章：
+  # 第 11 章一开始就再也看不到第 1 章，可那时本卷还没结束、卷梗概还没产生,
+  # 中间那八章谁都不管。
+  #
+  # 这个数只在**卷末压缩漏做**时才生效（窗口会一路长下去）。取 24 = 18 + 富余。
+  # 它一旦生效就是个信号：某一卷的压缩没跑成。
+  max_chapter_summaries: 24
+  prev_scene_tail_chars: 300     # 上一 scene 结尾多少字进 context
+  rag_snippets: 4                # RAG 检索片段数
